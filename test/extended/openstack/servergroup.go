@@ -1,14 +1,19 @@
 package openstack
 
 import (
+	"fmt"
 	"context"
 	"strings"
 
 	"github.com/gophercloud/gophercloud"
 	"github.com/gophercloud/gophercloud/openstack/compute/v2/extensions/servergroups"
+	"github.com/gophercloud/gophercloud/openstack/compute/v2/servers"
 	g "github.com/onsi/ginkgo"
 	o "github.com/onsi/gomega"
+	clientcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
+	exutil "github.com/openshift/origin/test/extended/util"	
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	yaml "gopkg.in/yaml.v2"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
@@ -17,6 +22,8 @@ import (
 
 var _ = g.Describe("[sig-installer][Feature:openstack] The OpenStack platform", func() {
 	defer g.GinkgoRecover()
+
+	oc := exutil.NewCLI("openstack")
 
 	// OCP 4.5: https://issues.redhat.com/browse/OSASINFRA-1300
 	g.It("creates Control plane nodes in a server group", func() {
@@ -71,6 +78,10 @@ var _ = g.Describe("[sig-installer][Feature:openstack] The OpenStack platform", 
 
 		g.By("checking the actual members of the Server group")
 		{
+			config, _ := installConfigFromCluster(oc.AdminKubeClient().CoreV1())
+			config_map := config.(map[interface {}]interface {})
+			e2e.Logf("My Config: %v",config_map["controlPlane"]["platform"])
+
 			computeClient, err := client(serviceCompute)
 			o.Expect(err).NotTo(o.HaveOccurred())
 
@@ -79,7 +90,25 @@ var _ = g.Describe("[sig-installer][Feature:openstack] The OpenStack platform", 
 
 			serverGroup, err := servergroups.Get(computeClient, serverGroupsWithThatName[0]).Extract()
 			o.Expect(serverGroup.Members, err).To(o.ContainElements(masterInstanceUUIDs...))
+
+			if len(serverGroup.Policies) == 1 {
+				//host_ids := make([]string, 0)
+				host_ids := make(map[string]int)
+
+				for _, server_id := range masterInstanceUUIDs {
+					server, err := servers.Get(computeClient, server_id.(string)).Extract()
+					o.Expect(err).NotTo(o.HaveOccurred())
+					host_ids[server.HostID] +=1
+				}
+				if serverGroup.Policies[0] == "anti-affinity"{
+//				    o.Expect(host_ids).To(o.HaveLen(2)))
+					o.Expect(host_ids).To(o.HaveLen(len(masterInstanceUUIDs)))
+
+				}
+			}
+
 		}
+
 	})
 })
 
@@ -113,3 +142,32 @@ func serverGroupIDsFromName(client *gophercloud.ServiceClient, name string) ([]s
 
 	return IDs, nil
 }
+
+//type installConfig struct {
+//	BASEDOMAIN string	 `json:"baseDomain,omitempty"`
+//}
+
+const (
+	installConfigName = "cluster-config-v1"
+)
+
+func installConfigFromCluster(client clientcorev1.ConfigMapsGetter) (interface{},error) {
+	cm, err := client.ConfigMaps("kube-system").Get(context.Background(), installConfigName, metav1.GetOptions{})
+	if err != nil {
+			return nil, err
+	}
+	data, ok := cm.Data["install-config"]
+	if !ok {
+			return nil, fmt.Errorf("no install-config found in kube-system/%s", installConfigName)
+	}
+	//config := &installConfig{}
+    //config := &installConfig{}
+	var config interface{}
+	if err := yaml.Unmarshal([]byte(data), &config); err != nil {
+			return nil, err
+	}
+	return config, nil
+}
+
+
+
