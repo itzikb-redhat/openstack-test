@@ -14,10 +14,13 @@ import (
 	exutil "github.com/openshift/origin/test/extended/util"
 	v1core "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/tools/clientcmd"
 	e2e "k8s.io/kubernetes/test/e2e/framework"
 	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
+	//monitoringv1alpha1 "sigs.k8s.io/prometheus-operator/pkg/apis/monitoring/v1alpha1"
 )
 
 var _ = g.Describe("[sig-installer][Suite:openshift/openstack] Machine", func() {
@@ -77,6 +80,7 @@ var _ = g.Describe("[sig-installer][Suite:openshift/openstack] Machine", func() 
 		route, err := oc.AdminRouteClient().RouteV1().Routes("openshift-monitoring").Get(ctx, "prometheus-k8s-federate", metav1.GetOptions{})
 		o.Expect(err).NotTo(o.HaveOccurred())
 		//Get route for federate in shiftstack openshift-monitoring
+		routeHost := route.Status.Ingress[0].Host
 		e2e.Logf("Route Host: %v", route.Status.Ingress[0].Host)
 		out, err := oc.Run("whoami").Args("-t").Output()
 		o.Expect(err).NotTo(o.HaveOccurred())
@@ -122,8 +126,102 @@ var _ = g.Describe("[sig-installer][Suite:openshift/openstack] Machine", func() 
 		defer client.Delete(ctx, "ocp-federated", metav1.DeleteOptions{})
 		e2e.Logf("Secret: %v", secret)
 		time.Sleep(time.Second * 10)
-	})
 
+		/*
+			scrapeConfig := &monitoringv1alpha1.ScrapeConfig{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "sos1-federated",
+					Namespace: "openstack",
+					Labels:    map[string]string{"service": "metricStorage"},
+				},
+				Spec: monitoringv1alpha1.ScrapeConfigSpec{
+					Scheme:         "https",
+					MetricsPath:    "federate",
+					ScrapeInterval: "30s",
+					Params: map[string][]string{
+						"match[]": {`{__name__=~"kube_node_info|kube_persistentvolume_info"}`},
+					},
+					Authorization: &monitoringv1alpha1.SafeAuthorization{
+						Type: "Bearer",
+						Credentials: &monitoringv1alpha1.SecretKeySelector{
+							Name: "ocp-federated",
+							Key:  "token",
+						},
+					},
+					TLSConfig: &monitoringv1alpha1.SafeTLSConfig{
+						InsecureSkipVerify: true,
+					},
+					StaticConfigs: []monitoringv1alpha1.StaticConfig{
+						{
+							Targets: []string{
+								routeHost,
+							},
+						},
+					},
+				},
+			}
+		*/
+		//pClient, err := versioned.NewForConfig(rhosoCfg)
+		pClient, err := dynamic.NewForConfig(rhosoCfg)
+
+		//scrapeConfig, err = pClient.MonitoringV1alpha1().ScrapeConfigs("openstack").Create(ctx, scrapeConfig, metav1.CreateOptions{})
+		gvr := schema.GroupVersionResource{
+			Group:    "monitoring.rhobs",
+			Version:  "v1alpha1",
+			Resource: "scrapeconfigs",
+		}
+
+		// Define the custom resource (ScrapeConfig) as a map
+		scrapeConfig := map[string]interface{}{
+			"apiVersion": "monitoring.rhobs/v1alpha1",
+			"kind":       "ScrapeConfig",
+			"metadata": map[string]interface{}{
+				"name":      "sos-federated",
+				"namespace": "openstack",
+				"labels": map[string]interface{}{
+					"service": "metricStorage",
+				},
+			},
+			"spec": map[string]interface{}{
+				"scheme":         "HTTPS",
+				"metricsPath":    "federate",
+				"scrapeInterval": "30s",
+				"params": map[string]interface{}{
+					"match[]": []string{
+						`{__name__=~"kube_node_info|kube_persistentvolume_info"}`,
+					},
+				},
+				"authorization": map[string]interface{}{
+					"type": "Bearer",
+					"credentials": map[string]interface{}{
+						"name": "ocp-federated",
+						"key":  "token",
+					},
+				},
+				"tlsConfig": map[string]interface{}{
+					"insecureSkipVerify": true,
+				},
+				"staticConfigs": []interface{}{
+					map[string]interface{}{
+						"targets": []string{
+							routeHost,
+						},
+					},
+				},
+			},
+		}
+		g.By("Creating ScrapeConfig....")
+		resourceClient := pClient.Resource(gvr).Namespace("openstack")
+		scrapeCfg, err := resourceClient.Create(ctx, &unstructured.Unstructured{
+			Object: scrapeConfig,
+		}, metav1.CreateOptions{})
+		o.Expect(err).NotTo(o.HaveOccurred())
+
+		e2e.Logf("scrapeCfg: %v", scrapeCfg)
+		defer resourceClient.Delete(ctx, "sos-federate", metav1.DeleteOptions{})
+		time.Sleep(time.Second * 10)
+
+	})
 })
 
 // Set the TestContextHost based on the Kubeconfig
